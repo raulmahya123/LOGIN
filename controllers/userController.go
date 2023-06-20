@@ -2,7 +2,10 @@ package controllers
 
 import (
 	"golangjwt-develop/database"
+	helper "golangjwt-develop/helpers"
+	"net/http"
 
+	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 	"go.mongodb.org/mongo-driver/mongo"
 )
@@ -20,4 +23,13 @@ func Login()
 
 func GetUsers()
 
-func GetUser()
+func GetUser() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userId := c.Param("id")
+
+		if err := helper.MatchUserTypeToUid(c, userId); err != nil { // memanggil helper MatchUserTypeToUid
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}) // jika error maka akan mengembalikan error
+			return                                                     // mengembalikan error
+		}
+	}
+}
