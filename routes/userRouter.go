@@ -8,7 +8,7 @@ import (
 )
 
 func UserRoutes(incomingRoutes *gin.Engine) { // membuat routes auth
-	incomingRoutes.Use(middleware.Authenticate())      // menggunakan middleware authenticate
-	incomingRoutes.GET("/user", controller.GetUsers()) // membuat routes user untuk mengani user
+	incomingRoutes.Use(middleware.Authenticate())       // menggunakan middleware authenticate
+	incomingRoutes.GET("/users", controller.GetUsers()) // membuat routes user untuk mengani user
 	incomingRoutes.GET("/user/:user_id", controller.GetUser())
 }
