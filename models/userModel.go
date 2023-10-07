@@ -21,5 +21,6 @@ type User struct {
 	Refresh_token *string            `json:"refresh_token"`                                  //validasi required yang di perlukan refresh token wajib
 	Created_at    time.Time          `json:"created_at"`                                     //validasi required yang di perlukan created at wajib
 	Updated_at    time.Time          `json:"updated_at"`                                     //validasi required yang di perlukan updated at wajib
-	User_id       *string            `json:"user_id"`                                        //validasi required yang di perlukan user id wajib
+	User_id       *string            `json:"user_id"`
+	Paseto_token  *string            `json:"paseto_token,omitempty"` //validasi required yang di perlukan user id wajib
 }

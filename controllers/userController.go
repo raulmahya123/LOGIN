@@ -2,9 +2,9 @@ package controllers
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"golangjwt-develop/database"
-	helper "golangjwt-develop/helpers"
 	"golangjwt-develop/models"
 	"log"
 	"net/http"
@@ -12,22 +12,26 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
+
+	helper "golangjwt-develop/helpers"
+
+	"github.com/dgrijalva/jwt-go"
 	"github.com/go-playground/validator/v10"
+	"github.com/o1egl/paseto/v2"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
-	"golang.org/x/crypto/bcrypt"
 )
 
 var userCollection *mongo.Collection = database.OpenCollection(database.Client, "user") // membuat collection baru
-var validate = validator.New()                                                          // membuat validator baru
+// Validation instance
+var validate = validator.New()
 
+// HashPassword hashes the plain password
 func HashPassword(password string) string {
-	bytes, err := bcrypt.GenerateFromPassword([]byte(password), 14)
-	if err != nil {
-		log.Panic(err)
-	}
-	return string(bytes)
+	hash, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(hash)
 }
 
 func VerifyPassword(userPassword string, providedPassword string) (bool, string) { // membuat fungsi VerifyPassword
@@ -41,46 +45,120 @@ func VerifyPassword(userPassword string, providedPassword string) (bool, string)
 	return check, msg // jika password tidak sama dengan providedPassword
 }
 
+// Generate a random PASETO secret key
+func generatePasetoKey() ([]byte, error) {
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	if err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+// Generate a random JWT secret key
+func generateJWTKey() ([]byte, error) {
+	key := make([]byte, 64) // You can adjust the key size as needed
+	_, err := rand.Read(key)
+	if err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+// Signup function
 func Signup() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var ctx, cancel = context.WithTimeout(context.Background(), 100*time.Second)
 		var user models.User
 
-		if err := c.BindJSON(&user); err != nil { // memasukkan data user ke dalam variabel user
+		if err := c.BindJSON(&user); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return // jika error maka akan mengembalikan error
+			return
 		}
-		validateErr := validate.Struct(user) // memvalidasi data users
+
+		validateErr := validate.Struct(user)
 		if validateErr != nil {
-
 			c.JSON(http.StatusBadRequest, gin.H{"error": validateErr.Error()})
-
+			return
 		}
-		count, err := userCollection.CountDocuments(ctx, bson.M{"email": user.Email}) // menghitung jumlah user berdasarkan email  )
+
+		count, err := userCollection.CountDocuments(ctx, bson.M{"email": user.Email})
 		defer cancel()
 		if err != nil {
 			log.Panic(err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "error occurred"})
+			return
 		}
-		password := HashPassword(*user.Password) // menghash password
+
+		password := HashPassword(*user.Password)
 		user.Password = &password
+
 		count, err = userCollection.CountDocuments(ctx, bson.M{"phone": user.Phone})
 		defer cancel()
 		if err != nil {
 			log.Panic(err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "error occurred"}) // menghitung jumlah user berdasarkan email  )
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "error occurred"})
+			return
 		}
+
 		if count > 0 {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "email already exists"})
+			return
 		}
+
 		user.Created_at, _ = time.Parse(time.RFC3339, time.Now().Format(time.RFC3339))
 		user.Updated_at, _ = time.Parse(time.RFC3339, time.Now().Format(time.RFC3339))
 		user.ID = primitive.NewObjectID()
 		userID := user.ID.Hex()
 		user.User_id = &userID
-		token, refreshToken, _ := helper.GenerateAllTokens(*user.Email, *user.First_name, *user.Last_name, *user.User_id, *user.User_type)
-		user.Token = &token
-		user.Refresh_token = &refreshToken
+
+		// Generate PASETO secret key
+		pasetoSecret, err := generatePasetoKey()
+		if err != nil {
+			log.Printf("Error generating PASETO key: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PASETO key"})
+			return
+		}
+
+		// Generate token PASETO
+		tokenClaims := paseto.JSONToken{
+			Subject:    *user.User_id,
+			Expiration: time.Now().Add(24 * time.Hour),
+		}
+
+		pasetoToken, err := paseto.NewV2().Encrypt(pasetoSecret, tokenClaims, nil)
+		if err != nil {
+			log.Printf("Error generating PASETO token: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PASETO token"})
+			return
+		}
+
+		user.Paseto_token = &pasetoToken
+
+		// Generate JWT secret key
+		jwtSecret, err := generateJWTKey()
+		if err != nil {
+			log.Printf("Error generating JWT key: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate JWT key"})
+			return
+		}
+
+		// Generate token JWT
+		tokenClaimsJWT := jwt.MapClaims{
+			"email":      *user.Email,
+			"first_name": *user.First_name,
+			"last_name":  *user.Last_name,
+			"uid":        *user.User_id,
+			"user_type":  *user.User_type,
+		}
+
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, tokenClaimsJWT)
+		jwtToken, err := token.SignedString(jwtSecret)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate JWT token"})
+			return
+		}
+		user.Token = &jwtToken
 
 		resultInsertNumber, insertErr := userCollection.InsertOne(ctx, user)
 		if insertErr != nil {
@@ -93,8 +171,8 @@ func Signup() gin.HandlerFunc {
 	}
 }
 
+// Login function
 func Login() gin.HandlerFunc {
-
 	return func(c *gin.Context) {
 		var ctx, cancel = context.WithTimeout(context.Background(), 100*time.Second)
 		var user models.User
@@ -104,16 +182,18 @@ func Login() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+
 		err := userCollection.FindOne(ctx, bson.M{"email": user.Email}).Decode(&foundUser)
 		defer cancel()
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "error occurred"})
 			return
 		}
+
 		passwordIsValid, msg := VerifyPassword(*user.Password, *foundUser.Password)
 		defer cancel()
 		if !passwordIsValid {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": msg})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": msg})
 			return
 		}
 
@@ -122,19 +202,60 @@ func Login() gin.HandlerFunc {
 			return
 		}
 
-		token, refreshToken, _ := helper.GenerateAllTokens(*foundUser.Email, *foundUser.First_name, *foundUser.Last_name, *foundUser.User_id, *foundUser.User_type)
-		helper.UpdateAllTokens(token, refreshToken, *foundUser.User_id)
-
-		err = userCollection.FindOne(ctx, bson.M{"user_id": foundUser.User_id}).Decode(&foundUser)
+		// Generate PASETO secret key for login
+		pasetoSecret, err := generatePasetoKey()
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			log.Printf("Error generating PASETO key: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PASETO key"})
 			return
 		}
 
+		// Generate PASETO token for login
+		pasetoClaims := paseto.JSONToken{
+			Subject:    *foundUser.User_id,
+			Expiration: time.Now().Add(24 * time.Hour),
+		}
+
+		pasetoToken, err := paseto.NewV2().Encrypt(pasetoSecret, pasetoClaims, nil)
+		if err != nil {
+			log.Printf("Error generating PASETO token: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PASETO token"})
+			return
+		}
+
+		// Update PASETO token in user model (foundUser)
+		foundUser.Paseto_token = &pasetoToken
+
+		// Generate JWT secret key for login
+		jwtSecret, err := generateJWTKey()
+		if err != nil {
+			log.Printf("Error generating JWT key: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate JWT key"})
+			return
+		}
+
+		// Generate JWT token for login
+		tokenClaimsJWT := jwt.MapClaims{
+			"email":      *foundUser.Email,
+			"first_name": *foundUser.First_name,
+			"last_name":  *foundUser.Last_name,
+			"uid":        *foundUser.User_id,
+			"user_type":  *foundUser.User_type,
+		}
+
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, tokenClaimsJWT)
+		jwtToken, err := token.SignedString(jwtSecret)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate JWT token"})
+			return
+		}
+		foundUser.Token = &jwtToken
+
+		// Save the updated user model with PASETO token to your database
+		// Example: userCollection.UpdateOne(ctx, bson.M{"user_id": foundUser.User_id}, bson.M{"$set": bson.M{"paseto_token": pasetoToken}})
+
 		c.JSON(http.StatusOK, foundUser)
-
 	}
-
 }
 
 func GetUsers() gin.HandlerFunc {
